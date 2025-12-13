@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hand Gesture 3D Solar System</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        
+        /* Mirror the video so interaction feels natural */
+        #video-input { 
+            position: absolute; 
+            bottom: 20px; 
+            right: 20px; 
+            width: 240px; 
+            height: 180px; 
+            border-radius: 10px;
+            transform: scaleX(-1); 
+            z-index: 2;
+            opacity: 0.5;
+            border: 2px solid #ffaa00; /* New border color for space theme */
+        }
+
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #ffaa00; font-size: 24px; pointer-events: none; z-index: 10;
+        }
+        
+        #ui {
+            position: absolute; top: 20px; left: 20px; color: white; z-index: 10;
+            pointer-events: none; text-shadow: 0 0 5px black;
+        }
+        .instruction { font-size: 14px; color: #aaa; margin-top: 5px; }
+        b { color: #ffaa00; }
+        #current-focus { font-size: 18px; margin-top: 10px; color: #00ffff; }
+    </style>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loading">Loading AI Models...</div>
+    <div id="ui">
+        <h2>🚀 Solar System Control</h2>
+        <div id="current-focus">Focus: Solar System</div>
+        <div class="instruction">✌️ <b>Victory Sign</b>: Next Planet Focus</div>
+        <div class="instruction">👌 <b>Pinch/Open</b>: Orbit Speed Control</div>
+        <div class="instruction">✋ <b>Hand Move X-axis</b>: Rotate View (Yaw)</div>
+        <div class="instruction">✊ <b>Fist</b>: Reset View / Pause</div>
+    </div>
+
+    <video id="video-input"></video>
+    
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+        // ==========================================
+        // 1. THREE.JS SETUP & SOLAR SYSTEM DATA
+        // ==========================================
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 40, 60); // Initial camera position
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+        renderer.setClearColor(0x000000); // Black space background
+
+        // Use a group to hold the entire solar system for easy rotation
+        const solarSystemGroup = new THREE.Group();
+        scene.add(solarSystemGroup);
+        
+        // Add Ambient Light (to see non-sun-lit side a little)
+        scene.add(new THREE.AmbientLight(0x333333)); 
+
+        // Planet Data (Radius, Distance, Speed, Color)
+        const planetData = [
+            { name: 'Sun', radius: 5.0, distance: 0, speed: 0, color: 0xffaa00, emissive: 0xffaa00, selfRotate: 0.001 },
+            { name: 'Mercury', radius: 0.5, distance: 8, speed: 0.02, color: 0x888888, selfRotate: 0.02 },
+            { name: 'Venus', radius: 1.2, distance: 12, speed: 0.015, color: 0xddccaa, selfRotate: 0.01 },
+            { name: 'Earth', radius: 1.3, distance: 18, speed: 0.01, color: 0x0077ff, selfRotate: 0.03 },
+            { name: 'Mars', radius: 0.8, distance: 24, speed: 0.008, color: 0xcc4400, selfRotate: 0.025 }
+        ];
+
+        const planets = {};
+        let currentFocusIndex = -1; // -1 for full system view
+
+        // Function to create all planets
+        function createSolarSystem() {
+            planetData.forEach((data) => {
+                const geometry = new THREE.SphereGeometry(data.radius, 32, 32);
+                
+                let material;
+                if (data.name === 'Sun') {
+                    // Sun is a source of light, not just a reflective mesh
+                    material = new THREE.MeshBasicMaterial({ color: data.color, emissive: data.emissive || 0x000000 });
+                    // Add a PointLight to the Sun's position
+                    const sunLight = new THREE.PointLight(0xffffff, 2, 500); // White light, intensity 2
+                    sunLight.position.set(0, 0, 0);
+                    solarSystemGroup.add(sunLight);
+                } else {
+                    // Planets use a standard material for realistic shading
+                    material = new THREE.MeshStandardMaterial({ color: data.color });
+                }
+
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.x = data.distance; // Initial position on X-axis for all
+                mesh.userData = { 
+                    name: data.name, 
+                    distance: data.distance, 
+                    speed: data.speed, 
+                    selfRotate: data.selfRotate 
+                };
+                
+                // Add the mesh to the group
+                solarSystemGroup.add(mesh);
+                planets[data.name] = mesh;
+            });
+        }
+
+        createSolarSystem();
+
+        // ==========================================
+        // 2. PLANET ORBIT LOGIC
+        // ==========================================
+        let globalSpeedMultiplier = 1.0;
+
+        function updateOrbits(time) {
+            planetData.forEach((data) => {
+                if (data.name === 'Sun') {
+                    planets[data.name].rotation.y += data.selfRotate; // Sun rotates on its axis
+                    return;
+                }
+
+                const planetMesh = planets[data.name];
+                const actualSpeed = data.speed * globalSpeedMultiplier;
+                
+                // Rotation on its axis
+                planetMesh.rotation.y += data.selfRotate;
+
+                // Position in orbit
+                planetMesh.position.x = Math.cos(time * actualSpeed) * data.distance;
+                planetMesh.position.z = Math.sin(time * actualSpeed) * data.distance;
+            });
+        }
+        
+        // ==========================================
+        // 3. MEDIAPIPE HAND TRACKING & GESTURE LOGIC
+        // ==========================================
+        const videoElement = document.getElementById('video-input');
+        let handExpansion = 1.0; // Controls orbit speed
+        let handRotationY = 0;   // Controls system rotation
+        let gestureDebounce = 0;
+        let isPaused = false; // For Fist gesture
+
+        function onResults(results) {
+            document.getElementById('loading').style.display = 'none';
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // 1. PINCH DETECTION (Thumb Tip #4, Index Tip #8) -> ORBIT SPEED
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                const distance = Math.sqrt(
+                    Math.pow(thumbTip.x - indexTip.x, 2) + 
+                    Math.pow(thumbTip.y - indexTip.y, 2)
+                );
+
+                // Map distance (approx 0.05 to 0.4) to speed multiplier (0.1 to 4.0)
+                globalSpeedMultiplier = THREE.MathUtils.mapLinear(distance, 0.05, 0.4, 0.1, 4.0);
+                globalSpeedMultiplier = THREE.MathUtils.clamp(globalSpeedMultiplier, 0.1, 4.0); // Clamp
+
+                // 2. ROTATION (Using Hand X position) -> VIEW ROTATION
+                const handX = landmarks[9].x; 
+                handRotationY = (handX - 0.5) * 4; // -2 to +2 speed
+
+                // 3. GESTURE RECOGNITION
+
+                // Detect "Fist" (Collapse Core / Pause)
+                const indexUp = landmarks[8].y < landmarks[6].y;
+                const middleUp = landmarks[12].y < landmarks[10].y;
+                const ringDown = landmarks[16].y > landmarks[14].y;
+                const pinkyDown = landmarks[20].y > landmarks[18].y;
+                const fist = !indexUp && !middleUp && ringDown && pinkyDown;
+
+                if (fist) {
+                     if (Date.now() - gestureDebounce > 1000) { // 1 second cooldown
+                        isPaused = !isPaused; // Toggle Pause
+                        gestureDebounce = Date.now();
+                        document.getElementById('current-focus').innerText = isPaused ? "Status: PAUSED" : "Status: RUNNING";
+                     }
+                }
+                
+                // Victory/Peace Sign -> Next Planet Focus
+                if (indexUp && middleUp && ringDown && pinkyDown) {
+                    if (Date.now() - gestureDebounce > 1500) { // 1.5 second cooldown
+                        currentFocusIndex = (currentFocusIndex + 1);
+                        if(currentFocusIndex >= planetData.length) {
+                             currentFocusIndex = -1; // Loop back to system view
+                        }
+                        gestureDebounce = Date.now();
+                        
+                        // Flash effect
+                        const originalColor = renderer.getClearColor().getHex();
+                        renderer.setClearColor(0x333333); 
+                        setTimeout(() => renderer.setClearColor(0x000000), 100);
+                    }
+                }
+
+            } else {
+                // No hand detected: drift back to normal
+                handExpansion = THREE.MathUtils.lerp(globalSpeedMultiplier, 1.0, 0.05);
+                handRotationY = THREE.MathUtils.lerp(handRotationY, 0.0, 0.05);
+            }
+        }
+
+        // Setup MediaPipe
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        // Start Camera
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({image: videoElement});
+            },
+            width: 640,
+            height: 480
+        });
+        cameraUtils.start();
+
+
+        // ==========================================
+        // 4. ANIMATION LOOP
+        // ==========================================
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if(!isPaused) {
+                const time = clock.getElapsedTime();
+                
+                // 1. Apply Hand Rotation to the entire system
+                solarSystemGroup.rotation.y += (handRotationY * 0.005);
+                
+                // 2. Update planet orbits (controlled by globalSpeedMultiplier/handExpansion)
+                updateOrbits(time);
+
+                // 3. Handle Camera Focus (Smooth Transition/Lerp)
+                let targetPosition = new THREE.Vector3(0, 40, 60);
+                let lookAtPosition = new THREE.Vector3(0, 0, 0);
+                
+                if (currentFocusIndex !== -1) {
+                    const focusPlanetData = planetData[currentFocusIndex];
+                    const focusPlanet = planets[focusPlanetData.name];
+                    
+                    document.getElementById('current-focus').innerText = "Focus: " + focusPlanetData.name;
+                    
+                    // Target camera position: Behind the planet, slightly above
+                    targetPosition = focusPlanet.position.clone();
+                    targetPosition.y += focusPlanetData.radius * 5; 
+                    targetPosition.z += 10; 
+                    
+                    lookAtPosition = focusPlanet.position.clone();
+
+                } else {
+                     document.getElementById('current-focus').innerText = "Focus: Solar System";
+                }
+
+                // Smoothly move camera
+                camera.position.lerp(targetPosition, 0.05);
+                
+                // Calculate camera's look direction and apply rotation from solarSystemGroup
+                const lookAtTarget = lookAtPosition.clone().applyEuler(solarSystemGroup.rotation);
+                camera.lookAt(lookAtTarget);
+
+            } else {
+                // If paused, just smoothly reset global speed for next run
+                globalSpeedMultiplier = THREE.MathUtils.lerp(globalSpeedMultiplier, 1.0, 0.1);
+            }
+            
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>
